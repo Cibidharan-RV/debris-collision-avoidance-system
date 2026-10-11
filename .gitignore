@@ -1,6 +1,8 @@
 # Ignore personal files
 keep_docs/
 data 
+gDrive.lnk
+output/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
