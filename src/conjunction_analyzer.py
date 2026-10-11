@@ -3,34 +3,10 @@ from datetime import timedelta
 import numpy as np
 from tle_manager import fetch_active_satellites
 
-def calculate_distance():
-    print("Loading satellites......")
-    satellites= fetch_active_satellites()
-    by_id = {sat.model.satnum : sat for sat in satellites}
-
-    iss = by_id.get(25544)
-    tiangong = by_id.get(48274)
-
-    if not iss or not tiangong:
-        print("Data not found")
-        return
-    print("Tracking satellites...")
-
-    ts = load.timescale()
-    t = ts.now()
-
-    position_iss = iss.at(t)
-    position_tiangong = tiangong.at(t)
-
-    difference = position_iss - position_tiangong
-    distance_km = difference.distance().km
-
-    print(f"Distance between ISS and Tiangong: {distance_km:.2f} km")
-
 def find_conjunctions(
         target_id:int,
-        fine_threshold_km:float = 10.0,
         search_window_mins:int = 90,
+        fine_threshold_km:float = 10.0,
         broad_threshold_km:float = 500
     ) -> list[dict]:
     print("loading conjunctions...")
@@ -59,12 +35,12 @@ def find_conjunctions(
 
         if (np.min(distances) < broad_threshold_km):
             if np.max(distances) < broad_threshold_km:
-                continue # co-orbotal objects
+                continue  # skip co-orbital satellites that fly in constellation formation
 
             broad_mid_idx = np.argmin(distances)
             broad_tca_time = time_steps[broad_mid_idx]
 
-            # FINE PHASE START
+            # 1-second step refinement
             fine_start = broad_tca_time - timedelta(seconds=60)
             fine_time_steps = [fine_start + timedelta(seconds=i) for i in range(120)]
             fine_times = ts.from_datetimes(fine_time_steps)
@@ -93,4 +69,6 @@ def find_conjunctions(
         print("No conjunctions detected.")
 
 if __name__ == "__main__":
-    find_conjunctions(25544, search_window_mins=1440)
+    list = [44714, 44886, 24455]
+    for target in list:
+        find_conjunctions(target)
