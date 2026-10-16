@@ -7,7 +7,6 @@ from skyfield.api import EarthSatellite, load
 
 ts = load.timescale()
 
-# Benchmark close-approach scenarios for testing
 BENCHMARK_SCENARIOS = {
     "starlink_cosmos": {
         "name": "Starlink-1008 vs Cosmos-1408 Debris",
@@ -107,15 +106,6 @@ class TLEManager:
         """Returns all benchmark scenarios."""
         return BENCHMARK_SCENARIOS
 
-# Backward compatibility
 def fetch_active_satellites() -> list[EarthSatellite]:
     mgr = TLEManager()
     return mgr.fetch_active_catalog()
-
-if __name__ == "__main__":
-    mgr = TLEManager()
-    print("Testing benchmark loading...")
-    s1, s2, meta = mgr.load_scenario("starlink_cosmos")
-    print(f"Loaded: {meta['name']}")
-    print(f"Primary: {s1.name} (NORAD {s1.model.satnum})")
-    print(f"Secondary: {s2.name} (NORAD {s2.model.satnum})")

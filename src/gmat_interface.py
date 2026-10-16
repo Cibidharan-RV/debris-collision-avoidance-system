@@ -4,6 +4,7 @@ import os
 import subprocess
 from datetime import datetime
 import numpy as np
+from src.orbital_frames import teme_to_gcrs, ric_to_vnb
 
 class GMATInterface:
     """Manages GMAT script generation and batch execution."""
@@ -37,20 +38,37 @@ class GMATInterface:
         v_secondary_km_s: np.ndarray,
         delta_v_ric_km_s: np.ndarray,
         propagation_duration_sec: float = 3600.0,
-        filename: str = "gmat_conjunction_verification.script"
+        filename: str = "gmat_conjunction_verification.script",
+        input_frame: str = "TEME"
     ) -> str:
-        """Generates a GMAT script for post-burn trajectory propagation."""
+        """Generates a GMAT script for post-burn trajectory propagation.
+        
+        The epoch_utc parameter must represent the exact epoch of the initial
+        spacecraft states (r_primary_km, v_primary_km_s) at the burn instant (t_burn),
+        aligning the coordinate states and impulsive burn with the simulation start.
+        
+        If input_frame == "TEME", the initial states are transformed into GMAT's
+        EarthMJ2000Eq (J2000 ECI) frame using the exact epoch_utc transformation.
+        """
+        if input_frame.upper() == "TEME":
+            r_prim_gmat, v_prim_gmat = teme_to_gcrs(epoch_utc, r_primary_km, v_primary_km_s)
+            r_sec_gmat, v_sec_gmat = teme_to_gcrs(epoch_utc, r_secondary_km, v_secondary_km_s)
+        else:
+            r_prim_gmat, v_prim_gmat = r_primary_km, v_primary_km_s
+            r_sec_gmat, v_sec_gmat = r_secondary_km, v_secondary_km_s
+
         epoch_str = epoch_utc.strftime("%d %b %Y %H:%M:%S.000")
         output_filepath = os.path.join(self.output_dir, filename)
 
-        # Map RIC to GMAT VNB axes: V = in-track, N = cross-track, B = radial
-        dv_radial = float(delta_v_ric_km_s[0])
-        dv_intrack = float(delta_v_ric_km_s[1])
-        dv_crosstrack = float(delta_v_ric_km_s[2])
+        dv_vnb = ric_to_vnb(r_prim_gmat, v_prim_gmat, delta_v_ric_km_s)
+        dv_v = float(dv_vnb[0])
+        dv_n = float(dv_vnb[1])
+        dv_b = float(dv_vnb[2])
 
         script_content = f"""%--------------------------------------------------------------------------
 % NASA GMAT Verification Script - Post-Maneuver Orbit Propagation
 % Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+% Input frame: {input_frame.upper()} -> Target frame: EarthMJ2000Eq
 %--------------------------------------------------------------------------
 
 %----------------------------------------
@@ -61,12 +79,12 @@ GMAT PrimarySatellite.DateFormat = UTCGregorian;
 GMAT PrimarySatellite.Epoch = '{epoch_str}';
 GMAT PrimarySatellite.CoordinateSystem = EarthMJ2000Eq;
 GMAT PrimarySatellite.DisplayStateType = Cartesian;
-GMAT PrimarySatellite.X = {r_primary_km[0]:.6f};
-GMAT PrimarySatellite.Y = {r_primary_km[1]:.6f};
-GMAT PrimarySatellite.Z = {r_primary_km[2]:.6f};
-GMAT PrimarySatellite.VX = {v_primary_km_s[0]:.6f};
-GMAT PrimarySatellite.VY = {v_primary_km_s[1]:.6f};
-GMAT PrimarySatellite.VZ = {v_primary_km_s[2]:.6f};
+GMAT PrimarySatellite.X = {r_prim_gmat[0]:.6f};
+GMAT PrimarySatellite.Y = {r_prim_gmat[1]:.6f};
+GMAT PrimarySatellite.Z = {r_prim_gmat[2]:.6f};
+GMAT PrimarySatellite.VX = {v_prim_gmat[0]:.6f};
+GMAT PrimarySatellite.VY = {v_prim_gmat[1]:.6f};
+GMAT PrimarySatellite.VZ = {v_prim_gmat[2]:.6f};
 GMAT PrimarySatellite.DryMass = 260; % Standard LEO SmallSat mass [kg]
 GMAT PrimarySatellite.Cd = 2.2;
 GMAT PrimarySatellite.DragArea = 2.0;
@@ -76,12 +94,12 @@ GMAT SpaceDebris.DateFormat = UTCGregorian;
 GMAT SpaceDebris.Epoch = '{epoch_str}';
 GMAT SpaceDebris.CoordinateSystem = EarthMJ2000Eq;
 GMAT SpaceDebris.DisplayStateType = Cartesian;
-GMAT SpaceDebris.X = {r_secondary_km[0]:.6f};
-GMAT SpaceDebris.Y = {r_secondary_km[1]:.6f};
-GMAT SpaceDebris.Z = {r_secondary_km[2]:.6f};
-GMAT SpaceDebris.VX = {v_secondary_km_s[0]:.6f};
-GMAT SpaceDebris.VY = {v_secondary_km_s[1]:.6f};
-GMAT SpaceDebris.VZ = {v_secondary_km_s[2]:.6f};
+GMAT SpaceDebris.X = {r_sec_gmat[0]:.6f};
+GMAT SpaceDebris.Y = {r_sec_gmat[1]:.6f};
+GMAT SpaceDebris.Z = {r_sec_gmat[2]:.6f};
+GMAT SpaceDebris.VX = {v_sec_gmat[0]:.6f};
+GMAT SpaceDebris.VY = {v_sec_gmat[1]:.6f};
+GMAT SpaceDebris.VZ = {v_sec_gmat[2]:.6f};
 GMAT SpaceDebris.DryMass = 50; % Debris fragment mass [kg]
 
 %----------------------------------------
@@ -105,15 +123,15 @@ GMAT PrinceDormand78.MinStep = 0.001;
 GMAT PrinceDormand78.MaxStep = 60;
 
 %----------------------------------------
-%---------- Impulsive Burn (RIC Frame)
+%---------- Impulsive Burn (VNB Frame)
 %----------------------------------------
 Create ImpulsiveBurn AvoidanceBurn;
 GMAT AvoidanceBurn.CoordinateSystem = Local;
 GMAT AvoidanceBurn.Origin = Earth;
 GMAT AvoidanceBurn.Axes = VNB;
-GMAT AvoidanceBurn.Element1 = {dv_intrack:.6f};    % V: In-track [km/s]
-GMAT AvoidanceBurn.Element2 = {dv_crosstrack:.6f}; % N: Cross-track [km/s]
-GMAT AvoidanceBurn.Element3 = {dv_radial:.6f};     % B: Radial [km/s]
+GMAT AvoidanceBurn.Element1 = {dv_v:.6f}; % V: Velocity direction [km/s]
+GMAT AvoidanceBurn.Element2 = {dv_n:.6f}; % N: Orbit normal [km/s]
+GMAT AvoidanceBurn.Element3 = {dv_b:.6f}; % B: Binormal [km/s]
 
 %----------------------------------------
 %---------- Output Report
@@ -152,21 +170,3 @@ Propagate PrinceDormand78(PrimarySatellite, SpaceDebris) {{PrimarySatellite.Elap
             return res.returncode == 0
         except Exception:
             return False
-
-if __name__ == "__main__":
-    gmat = GMATInterface()
-    sample_r = np.array([6878.0, 0.0, 0.0])
-    sample_v = np.array([0.0, 7.61, 0.0])
-    sample_dv = np.array([0.0001, 0.0005, 0.0])
-    path = gmat.generate_verification_script(
-        "STARLINK-1008",
-        "COSMOS-1408 DEBRIS",
-        datetime(2026, 10, 11, 12, 0, 0),
-        sample_r,
-        sample_v,
-        sample_r + np.array([0.3, 0.2, 0.1]),
-        sample_v + np.array([0.001, 0.0, 0.0]),
-        sample_dv
-    )
-    print("NASA GMAT Script generated successfully at:", path)
-    print("GMAT executable detected:", gmat.is_gmat_available())

@@ -30,11 +30,11 @@ class OrbitVisualizer:
             x=x, y=y, z=z,
             surfacecolor=colors,
             colorscale=[
-                [0.0, "#0b1d3a"],   # Deep ocean
-                [0.4, "#153966"],   # Coastal shelf
-                [0.6, "#225e52"],   # Continental green
-                [0.8, "#524430"],   # Terrain brown
-                [1.0, "#d0e0eb"]    # Polar ice
+                [0.0, "#0b1d3a"],
+                [0.4, "#153966"],
+                [0.6, "#225e52"],
+                [0.8, "#524430"],
+                [1.0, "#d0e0eb"]
             ],
             showscale=False,
             opacity=0.95,
@@ -55,10 +55,8 @@ class OrbitVisualizer:
         """Generates interactive 3D HTML plot of encounter and avoidance maneuver."""
         fig = go.Figure()
 
-        # Earth sphere
         fig.add_trace(self._create_earth_mesh())
 
-        # Primary orbit (pre-burn)
         fig.add_trace(go.Scatter3d(
             x=sat_traj[0, :],
             y=sat_traj[1, :],
@@ -69,7 +67,6 @@ class OrbitVisualizer:
             hoverinfo='name'
         ))
 
-        # Debris orbit
         fig.add_trace(go.Scatter3d(
             x=deb_traj[0, :],
             y=deb_traj[1, :],
@@ -80,7 +77,6 @@ class OrbitVisualizer:
             hoverinfo='name'
         ))
 
-        # TCA point
         r_tca = event.r_primary_tca
         fig.add_trace(go.Scatter3d(
             x=[r_tca[0]],
@@ -94,10 +90,9 @@ class OrbitVisualizer:
             hovertext=f"Miss Distance: {event.miss_distance_km:.4f} km<br>TCA: {event.tca_epoch.strftime('%H:%M:%S UTC')}"
         ))
 
-        # Scaled safety sphere around TCA for display
         u = np.linspace(0, 2 * np.pi, 20)
         v = np.linspace(0, np.pi, 10)
-        display_scale = 150.0  
+        display_scale = 150.0
         xs = r_tca[0] + display_scale * np.outer(np.cos(u), np.sin(v))
         ys = r_tca[1] + display_scale * np.outer(np.sin(u), np.sin(v))
         zs = r_tca[2] + display_scale * np.outer(np.ones(np.size(u)), np.cos(v))
@@ -107,11 +102,11 @@ class OrbitVisualizer:
             colorscale=[[0, 'rgba(255, 60, 0, 0.25)'], [1, 'rgba(255, 60, 0, 0.25)']],
             showscale=False,
             opacity=0.35,
-            name=f"Safety Boundary ({event.risk_threshold_km:.1f} km)",
-            hoverinfo="name"
+            name=f"Safety Indicator [{event.risk_threshold_km:.1f} km threshold, magnified 150x for display]",
+            hoverinfo="name+text",
+            hovertext=f"Physical Safety Threshold: {event.risk_threshold_km:.1f} km (magnified 150x to {display_scale:.0f} km radius for visibility against Earth)"
         ))
 
-        # Post-burn trajectory
         if post_burn_sat_traj is not None:
             fig.add_trace(go.Scatter3d(
                 x=post_burn_sat_traj[0, :],
@@ -119,14 +114,14 @@ class OrbitVisualizer:
                 z=post_burn_sat_traj[2, :],
                 mode='lines',
                 line=dict(color='#05ffa1', width=6),
-                name="Post-Burn Safe Trajectory (Verified)",
+                name="Post-Burn Safe Trajectory (Verified under model)",
                 hoverinfo='name'
             ))
 
-        # Burn impulse vector
         if burn_point is not None and delta_v_eci is not None:
-            dv_scale = 200000.0  
+            dv_scale = 200000.0
             dv_end = burn_point + delta_v_eci * dv_scale
+            dv_mag_m_s = np.linalg.norm(delta_v_eci) * 1000.0
             fig.add_trace(go.Scatter3d(
                 x=[burn_point[0], dv_end[0]],
                 y=[burn_point[1], dv_end[1]],
@@ -134,18 +129,17 @@ class OrbitVisualizer:
                 mode='lines+markers',
                 line=dict(color='#ffe600', width=7),
                 marker=dict(size=[8, 4], color='#ffe600'),
-                name="ΔV Thrust Impulse Vector",
-                hovertext=f"Impulse: {np.linalg.norm(delta_v_eci)*1000:.2f} m/s"
+                name="ΔV Thrust Vector [Direction indicator, scaled]",
+                hovertext=f"Impulse Magnitude: {dv_mag_m_s:.2f} m/s (GCRS inertial direction)"
             ))
 
-        # Scene camera and dark theme layout
         fig.update_layout(
             title=dict(
                 text=(
                     f"<b>LEO Debris Collision Avoidance System — 3D Encounter Geometry</b><br>"
                     f"<span style='font-size:13px; color:#a0aec0;'>"
                     f"Primary: {event.primary_name} | Secondary: {event.secondary_name} | "
-                    f"Miss Distance: {event.miss_distance_km:.4f} km</span>"
+                    f"Predicted Miss Distance: {event.miss_distance_km:.4f} km | Frame: GCRS (J2000 Inertial)</span>"
                 ),
                 font=dict(family="Segoe UI, Inter, sans-serif", size=18, color="#ffffff"),
                 x=0.03, y=0.95
@@ -153,9 +147,9 @@ class OrbitVisualizer:
             paper_bgcolor="#080c14",
             plot_bgcolor="#080c14",
             scene=dict(
-                xaxis=dict(title="X [km] (ECI)", backgroundcolor="#080c14", gridcolor="#1a2333", showbackground=True),
-                yaxis=dict(title="Y [km] (ECI)", backgroundcolor="#080c14", gridcolor="#1a2333", showbackground=True),
-                zaxis=dict(title="Z [km] (ECI)", backgroundcolor="#080c14", gridcolor="#1a2333", showbackground=True),
+                xaxis=dict(title="X [km] (GCRS / J2000 Inertial)", backgroundcolor="#080c14", gridcolor="#1a2333", showbackground=True),
+                yaxis=dict(title="Y [km] (GCRS / J2000 Inertial)", backgroundcolor="#080c14", gridcolor="#1a2333", showbackground=True),
+                zaxis=dict(title="Z [km] (GCRS / J2000 Inertial)", backgroundcolor="#080c14", gridcolor="#1a2333", showbackground=True),
                 aspectmode="data",
                 camera=dict(
                     eye=dict(x=1.35, y=1.35, z=0.95)
@@ -168,13 +162,18 @@ class OrbitVisualizer:
                 borderwidth=1,
                 x=0.02, y=0.1
             ),
+            annotations=[
+                dict(
+                    text="Scale Note: Safety sphere (150x) and ΔV vector are magnified for visual clarity against Earth radius (6,378 km). All numerical distance labels are true unmagnified physical distances in km.",
+                    showarrow=False,
+                    xref="paper", yref="paper",
+                    x=0.03, y=0.02,
+                    font=dict(size=10, color="#94a3b8")
+                )
+            ],
             margin=dict(l=0, r=0, b=0, t=60)
         )
 
         output_path = os.path.join(self.output_dir, filename)
         fig.write_html(output_path, include_plotlyjs="cdn")
         return output_path
-
-if __name__ == "__main__":
-    vis = OrbitVisualizer()
-    print("Visualizer module ready.")

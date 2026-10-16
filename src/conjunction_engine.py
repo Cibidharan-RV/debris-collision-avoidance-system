@@ -8,14 +8,52 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import numpy as np
-from scipy.optimize import minimize_scalar, brentq
-from sgp4.api import jday
+from scipy.optimize import minimize_scalar
+from sgp4.api import jday, SGP4_ERRORS
 from skyfield.api import EarthSatellite, load
 
 from src.constants import MU_EARTH, SAFETY_DISTANCE_KM, BROAD_THRESHOLD_KM
 from src.orbital_frames import compute_semi_major_axis, compute_relative_state
 
 ts = load.timescale()
+
+class SGP4PropagationError(RuntimeError):
+    """Raised when SGP4 propagation fails with a nonzero error code or invalid states."""
+    def __init__(self, sat_name: str, sat_id: int | str, error_code: int, epoch: datetime):
+        msg_detail = SGP4_ERRORS.get(error_code, f"Unknown error code {error_code}")
+        super().__init__(
+            f"SGP4 propagation failed for {sat_name} (ID: {sat_id}) at {epoch.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} UTC: "
+            f"Error code {error_code} ({msg_detail})"
+        )
+        self.sat_name = sat_name
+        self.sat_id = sat_id
+        self.error_code = error_code
+        self.epoch = epoch
+
+
+def propagate_sgp4_safe(sat: EarthSatellite, jd: float, fraction: float, epoch: datetime) -> tuple[np.ndarray, np.ndarray]:
+    """Evaluates satellite state with strict SGP4 error code and finite numerical checks."""
+    err, r, v = sat.model.sgp4(jd, fraction)
+    sat_name = getattr(sat, 'name', 'UNKNOWN')
+    sat_id = getattr(getattr(sat, 'model', None), 'satnum', 'UNKNOWN')
+
+    if err != 0:
+        raise SGP4PropagationError(sat_name, sat_id, err, epoch)
+
+    r_arr = np.array(r, dtype=float)
+    v_arr = np.array(v, dtype=float)
+
+    if not (np.all(np.isfinite(r_arr)) and np.all(np.isfinite(v_arr))):
+        raise ValueError(
+            f"SGP4 produced non-finite state vectors for {sat_name} (ID: {sat_id}) at {epoch.isoformat()}"
+        )
+    if np.linalg.norm(r_arr) < 1.0:
+        raise ValueError(
+            f"SGP4 produced degenerate zero position for {sat_name} (ID: {sat_id}) at {epoch.isoformat()}"
+        )
+
+    return r_arr, v_arr
+
 
 def datetime_to_sgp4_jd(dt: datetime) -> tuple[float, float]:
     """Converts a datetime to SGP4 whole JD and day fraction."""
@@ -37,34 +75,48 @@ class ConjunctionEvent:
     relative_velocity_km_s: float
     range_rate_km_s: float
     
-    # State vectors in TEME at TCA
     r_primary_tca: np.ndarray
     v_primary_tca: np.ndarray
     r_secondary_tca: np.ndarray
     v_secondary_tca: np.ndarray
     
     pre_burn_sma_km: float
-    collision_probability_pc: float
+    heuristic_risk_proxy: float
     is_risk: bool
     risk_threshold_km: float = SAFETY_DISTANCE_KM
+    collision_probability_pc: float | None = None
+    uncalibrated_collision_risk_indicator: float | None = None
+
+    def __post_init__(self):
+        if self.collision_probability_pc is None:
+            self.collision_probability_pc = self.heuristic_risk_proxy
+        if self.uncalibrated_collision_risk_indicator is None:
+            self.uncalibrated_collision_risk_indicator = self.heuristic_risk_proxy
 
     def summary(self) -> str:
         status = "CRITICAL COLLISION RISK" if self.is_risk else "SAFE PASS"
         return (
             f"[{status}] {self.primary_name} x {self.secondary_name}\n"
-            f"  TCA (UTC):        {self.tca_epoch.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} UTC\n"
-            f"  Miss Distance:    {self.miss_distance_km:.4f} km (Threshold: {self.risk_threshold_km:.1f} km)\n"
-            f"  Relative Speed:   {self.relative_velocity_km_s:.3f} km/s ({self.relative_velocity_km_s * 3600:.1f} km/h)\n"
-            f"  Collision Prob:   {self.collision_probability_pc:.2e}\n"
-            f"  Pre-Burn SMA:     {self.pre_burn_sma_km:.3f} km"
+            f"  TCA (UTC):                 {self.tca_epoch.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} UTC\n"
+            f"  Predicted Miss Distance:   {self.miss_distance_km:.4f} km (Threshold: {self.risk_threshold_km:.1f} km)\n"
+            f"  Relative Speed:            {self.relative_velocity_km_s * 1000.0:.2f} m/s ({self.relative_velocity_km_s:.4f} km/s | {self.relative_velocity_km_s * 3600.0:.2f} km/h)\n"
+            f"  Heuristic Risk Proxy:      {self.heuristic_risk_proxy:.2e} [UNRELIABLE / UNCALIBRATED]\n"
+            f"  [WARNING] Collision risk indicator is an uncalibrated 2D isotropic proxy, NOT an operational covariance-based Pc. Do not use for operational threshold compliance.\n"
+            f"  Pre-Burn SMA:              {self.pre_burn_sma_km:.3f} km"
         )
 
-def compute_2d_collision_probability(
+def compute_heuristic_risk_proxy(
     miss_distance_km: float,
     combined_sigma_km: float = 0.150,
     hard_body_radius_km: float = 0.010
 ) -> float:
-    """Estimates 2D collision probability (Pc) on the encounter B-plane."""
+    """Estimates an uncalibrated 2D geometric collision risk indicator proxy on the encounter B-plane.
+    
+    WARNING: This calculation is a simplified isotropic circular-normal heuristic proxy.
+    It is NOT an operational covariance-based collision probability (which requires full 3D
+    state error covariances propagated to TCA). It must NEVER be used to claim compliance
+    with an operational collision probability threshold (e.g. 1e-4).
+    """
     if miss_distance_km <= 0:
         return 1.0
     u = (miss_distance_km ** 2) / (2.0 * (combined_sigma_km ** 2))
@@ -72,6 +124,18 @@ def compute_2d_collision_probability(
     pc = 1.0 - np.exp(-factor)
     pc_scaled = float(pc * np.exp(-u))
     return min(1.0, max(1e-12, pc_scaled))
+
+def compute_2d_collision_probability(
+    miss_distance_km: float,
+    combined_sigma_km: float = 0.150,
+    hard_body_radius_km: float = 0.010
+) -> float:
+    """Alias for compute_heuristic_risk_proxy for backward compatibility."""
+    return compute_heuristic_risk_proxy(
+        miss_distance_km=miss_distance_km,
+        combined_sigma_km=combined_sigma_km,
+        hard_body_radius_km=hard_body_radius_km
+    )
 
 class ConjunctionEngine:
     """Conjunction screening engine using coarse grid search followed by Brent optimization."""
@@ -92,20 +156,18 @@ class ConjunctionEngine:
     ) -> tuple[float, float, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """Calculates distance and range-rate at a given epoch."""
         if isinstance(epoch_input, datetime):
-            jd, fraction = datetime_to_sgp4_jd(epoch_input)
+            epoch_dt = epoch_input if epoch_input.tzinfo else epoch_input.replace(tzinfo=timezone.utc)
+            jd, fraction = datetime_to_sgp4_jd(epoch_dt)
         elif hasattr(epoch_input, 'utc_datetime'):
-            jd, fraction = datetime_to_sgp4_jd(epoch_input.utc_datetime())
+            epoch_dt = epoch_input.utc_datetime()
+            jd, fraction = datetime_to_sgp4_jd(epoch_dt)
         else:
             jd = epoch_input.whole
             fraction = epoch_input.tai_fraction - epoch_input._leap_seconds() / 86400.0
+            epoch_dt = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
-        _, r1, v1 = sat1.model.sgp4(jd, fraction)
-        _, r2, v2 = sat2.model.sgp4(jd, fraction)
-        
-        r1 = np.array(r1, dtype=float)
-        v1 = np.array(v1, dtype=float)
-        r2 = np.array(r2, dtype=float)
-        v2 = np.array(v2, dtype=float)
+        r1, v1 = propagate_sgp4_safe(sat1, jd, fraction, epoch_dt)
+        r2, v2 = propagate_sgp4_safe(sat2, jd, fraction, epoch_dt)
         
         _, _, dist_km, range_rate = compute_relative_state(r1, v1, r2, v2)
         return dist_km, range_rate, r1, v1, r2, v2
@@ -126,30 +188,28 @@ class ConjunctionEngine:
         total_seconds = duration_minutes * 60.0
         time_offsets = np.arange(0.0, total_seconds, self.coarse_step_sec)
         
-        # Coarse grid pass
         distances_coarse = []
         for sec in time_offsets:
             dt = start_time + timedelta(seconds=float(sec))
             jd, fraction = datetime_to_sgp4_jd(dt)
-            _, r1, _ = sat1.model.sgp4(jd, fraction)
-            _, r2, _ = sat2.model.sgp4(jd, fraction)
-            diff = np.array(r2) - np.array(r1)
+            r1, _ = propagate_sgp4_safe(sat1, jd, fraction, dt)
+            r2, _ = propagate_sgp4_safe(sat2, jd, fraction, dt)
+            diff = r2 - r1
             distances_coarse.append(float(np.linalg.norm(diff)))
         distances_coarse = np.array(distances_coarse)
         
         min_idx = int(np.argmin(distances_coarse))
         t_coarse_min_sec = float(time_offsets[min_idx])
         
-        # Fine search around coarse minimum
         bracket_min = max(0.0, t_coarse_min_sec - 2.0 * self.coarse_step_sec)
         bracket_max = min(total_seconds, t_coarse_min_sec + 2.0 * self.coarse_step_sec)
         
         def scalar_dist_obj(t_sec: float) -> float:
             dt = start_time + timedelta(seconds=float(t_sec))
             jd, fraction = datetime_to_sgp4_jd(dt)
-            _, r1, _ = sat1.model.sgp4(jd, fraction)
-            _, r2, _ = sat2.model.sgp4(jd, fraction)
-            diff = np.array(r2) - np.array(r1)
+            r1, _ = propagate_sgp4_safe(sat1, jd, fraction, dt)
+            r2, _ = propagate_sgp4_safe(sat2, jd, fraction, dt)
+            diff = r2 - r1
             return float(np.linalg.norm(diff))
             
         opt_res = minimize_scalar(
@@ -162,7 +222,6 @@ class ConjunctionEngine:
         refined_tca_sec = float(opt_res.x)
         tca_epoch = start_time + timedelta(seconds=refined_tca_sec)
         
-        # Evaluate states at refined TCA
         d_miss, range_rate, r1_tca, v1_tca, r2_tca, v2_tca = self.evaluate_distance_at_time(
             sat1, sat2, tca_epoch
         )
@@ -187,16 +246,8 @@ class ConjunctionEngine:
             r_secondary_tca=r2_tca,
             v_secondary_tca=v2_tca,
             pre_burn_sma_km=sma_pre,
+            heuristic_risk_proxy=pc,
             collision_probability_pc=pc,
             is_risk=is_risk,
             risk_threshold_km=self.safety_distance_km
         )
-
-if __name__ == "__main__":
-    from src.tle_manager import TLEManager
-    mgr = TLEManager()
-    sat1, sat2, meta = mgr.load_scenario("starlink_cosmos")
-    engine = ConjunctionEngine()
-    print("Running conjunction screening...")
-    event = engine.analyze_pair(sat1, sat2)
-    print(event.summary())
